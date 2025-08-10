@@ -12,6 +12,7 @@ yarn-error.log*
 
 # Runtime data
 sent-tweets.json
+sent-tweets-*.json
 *.log
 logs/
 

@@ -37,33 +37,86 @@ class RTCleaner {
   private loadSentTweets(): void {
     try {
       if (fs.existsSync(this.sentTweetsFile)) {
+        const stats = fs.statSync(this.sentTweetsFile);
+        const fileSizeMB = stats.size / (1024 * 1024);
+        
+        console.log(`📊 Sent tweets file size: ${fileSizeMB.toFixed(2)} MB`);
+        
+        // If file is too large (>10MB), rotate it
+        if (fileSizeMB > 10) {
+          this.rotateSentTweetsFile();
+        }
+        
         const data = fs.readFileSync(this.sentTweetsFile, 'utf8');
         const sentTweets: SentTweetTracker[] = JSON.parse(data);
         
-        // Clean up old entries (older than 24 hours)
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const validTweets = sentTweets.filter(tweet => new Date(tweet.sentAt) > oneDayAgo);
+        // More aggressive cleanup: only keep last 6 hours to reduce memory usage
+        const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+        const validTweets = sentTweets.filter(tweet => new Date(tweet.sentAt) > sixHoursAgo);
         
-        this.sentTweets = new Set(validTweets.map(tweet => tweet.recordId));
+        // If we removed more than 50% of entries, save the cleaned data
+        if (validTweets.length < sentTweets.length * 0.5) {
+          console.log(`🧹 Cleaned up ${sentTweets.length - validTweets.length} old entries`);
+          this.sentTweets = new Set(validTweets.map(tweet => tweet.recordId));
+          this.saveSentTweets();
+        } else {
+          this.sentTweets = new Set(validTweets.map(tweet => tweet.recordId));
+        }
         
-        // Save cleaned data back
-        this.saveSentTweets();
-        
-        console.log(`📚 Loaded ${this.sentTweets.size} previously sent tweets`);
+        console.log(`📚 Loaded ${this.sentTweets.size} recent sent tweets (last 6 hours)`);
       }
     } catch (error) {
       console.error('⚠️ Failed to load sent tweets file:', (error as Error).message);
+      // Start fresh if file is corrupted
+      this.sentTweets = new Set();
+    }
+  }
+
+  private rotateSentTweetsFile(): void {
+    try {
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      const archiveFile = `sent-tweets-${timestamp}.json`;
+      
+      console.log(`🔄 Rotating large sent tweets file to: ${archiveFile}`);
+      fs.renameSync(this.sentTweetsFile, archiveFile);
+      
+      // Clean up old archive files (keep only last 5)
+      const archivePattern = /^sent-tweets-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.json$/;
+      const files = fs.readdirSync(process.cwd())
+        .filter(file => archivePattern.test(file))
+        .sort()
+        .reverse();
+      
+      // Remove old archives, keep only 5 most recent
+      files.slice(5).forEach(file => {
+        console.log(`🗑️ Removing old archive: ${file}`);
+        fs.unlinkSync(file);
+      });
+      
+    } catch (error) {
+      console.error('⚠️ Failed to rotate sent tweets file:', (error as Error).message);
     }
   }
 
   private saveSentTweets(): void {
     try {
-      const data: SentTweetTracker[] = Array.from(this.sentTweets).map(recordId => ({
+      // Only save recent tweets (last 6 hours) to keep file small
+      const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const recentData: SentTweetTracker[] = Array.from(this.sentTweets).map(recordId => ({
         recordId,
         sentAt: new Date()
-      }));
+      })).filter(tweet => tweet.sentAt > sixHoursAgo);
       
-      fs.writeFileSync(this.sentTweetsFile, JSON.stringify(data, null, 2));
+      // Use compact JSON format (no pretty printing) to save space
+      fs.writeFileSync(this.sentTweetsFile, JSON.stringify(recentData));
+      
+      // Log file size periodically for monitoring
+      if (Math.random() < 0.1) { // 10% chance to log
+        const stats = fs.statSync(this.sentTweetsFile);
+        const fileSizeKB = (stats.size / 1024).toFixed(1);
+        console.log(`💾 Sent tweets file: ${fileSizeKB} KB, ${recentData.length} entries`);
+      }
+      
     } catch (error) {
       console.error('⚠️ Failed to save sent tweets file:', (error as Error).message);
     }
