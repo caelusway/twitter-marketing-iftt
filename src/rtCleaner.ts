@@ -151,6 +151,44 @@ class RTCleaner {
   }
 
   /**
+   * Checks if a tweet is a reply based on text content
+   */
+  private isReply(text: string | undefined): boolean {
+    if (!text) return false;
+    
+    const cleanText = text.trim();
+    
+    // Primary indicator: starts with @username
+    const replyPatterns: RegExp[] = [
+      /^@\w+/i,                          // @username
+      /^@[\w_]+/i,                       // @user_name (with underscores)
+      /^@\w+\s/i,                        // @username followed by space
+      /^@[\w_]+\s/i                      // @user_name followed by space
+    ];
+    
+    const isReplyByMention = replyPatterns.some(pattern => pattern.test(cleanText));
+    
+    // Secondary indicators in text content
+    const replyIndicators = [
+      'replying to',
+      'in reply to', 
+      'responding to'
+    ];
+    
+    const hasReplyIndicator = replyIndicators.some(indicator => 
+      cleanText.toLowerCase().includes(indicator)
+    );
+    
+    const isReplyTweet = isReplyByMention || hasReplyIndicator;
+    
+    if (isReplyTweet) {
+      console.log(`💬 Detected reply pattern in: "${cleanText.substring(0, 50)}..."`);
+    }
+    
+    return isReplyTweet;
+  }
+
+  /**
    * Send new tweets via Telegram
    */
   private async sendNewTweets(): Promise<void> {
@@ -167,19 +205,25 @@ class RTCleaner {
         sort: [{ field: 'CreatedAt', direction: 'desc' }]
       }).all();
       
-      // Filter out RTs and already sent tweets
+      // Filter out RTs, replies, and already sent tweets
       const newTweets = records.filter(record => {
         const text = record.get('Text');
         const isRt = this.isRetweet(text);
+        const isReplyTweet = this.isReply(text);
         const alreadySent = this.sentTweets.has(record.id);
         
-        // Double-check: ensure we never send RT records
+        // Double-check: ensure we never send RT or reply records
         if (isRt) {
           console.log(`🚫 Filtering out RT record: "${text?.substring(0, 30)}..."`);
           return false;
         }
         
-        return !alreadySent && text; // Only non-RT, unsent tweets with text
+        if (isReplyTweet) {
+          console.log(`💬 Filtering out reply record: "${text?.substring(0, 30)}..."`);
+          return false;
+        }
+        
+        return !alreadySent && text; // Only original, unsent tweets with text
       });
       
       if (newTweets.length === 0) {
@@ -213,11 +257,11 @@ class RTCleaner {
   }
 
   /**
-   * Delete RT records from Airtable
+   * Delete RT and reply records from Airtable
    */
-  public async deleteRetweetRecords(): Promise<void> {
+  public async deleteRetweetAndReplyRecords(): Promise<void> {
     try {
-      console.log('🔍 Starting RT cleanup process...');
+      console.log('🔍 Starting RT and reply cleanup process...');
       
       const records = await this.table.select({
         fields: ['Text', 'UserName', 'LinkToTweet', 'CreatedAt']
@@ -225,29 +269,40 @@ class RTCleaner {
       
       console.log(`📊 Found ${records.length} total records`);
       
+      // Filter RT records
       const rtRecords = records.filter(record => {
         const text = record.get('Text');
         return this.isRetweet(text);
       });
       
-      console.log(`🔄 Found ${rtRecords.length} RT records to delete`);
+      // Filter reply records
+      const replyRecords = records.filter(record => {
+        const text = record.get('Text');
+        return this.isReply(text) && !this.isRetweet(text); // Avoid double-counting RT replies
+      });
       
-      if (rtRecords.length === 0) {
-        console.log('✅ No RT records found. Database is clean!');
+      const allRecordsToDelete = [...rtRecords, ...replyRecords];
+      
+      console.log(`🔄 Found ${rtRecords.length} RT records to delete`);
+      console.log(`💬 Found ${replyRecords.length} reply records to delete`);
+      console.log(`📝 Total records to delete: ${allRecordsToDelete.length}`);
+      
+      if (allRecordsToDelete.length === 0) {
+        console.log('✅ No RT or reply records found. Database is clean!');
         return;
       }
       
       const batchSize = 10;
       let deletedCount = 0;
       
-      for (let i = 0; i < rtRecords.length; i += batchSize) {
-        const batch = rtRecords.slice(i, i + batchSize);
+      for (let i = 0; i < allRecordsToDelete.length; i += batchSize) {
+        const batch = allRecordsToDelete.slice(i, i + batchSize);
         const recordIds = batch.map(record => record.id);
         
         try {
           await this.table.destroy(recordIds);
           deletedCount += recordIds.length;
-          console.log(`🗑️  Deleted batch of ${recordIds.length} RT records`);
+          console.log(`🗑️  Deleted batch of ${recordIds.length} RT/reply records`);
           
           await new Promise(resolve => setTimeout(resolve, 200));
         } catch (error) {
@@ -255,10 +310,10 @@ class RTCleaner {
         }
       }
       
-      console.log(`✅ RT cleanup completed! Deleted ${deletedCount} retweet records.`);
+      console.log(`✅ Cleanup completed! Deleted ${deletedCount} RT/reply records.`);
       
     } catch (error) {
-      console.error('❌ Error during RT cleanup:', (error as Error).message);
+      console.error('❌ Error during RT/reply cleanup:', (error as Error).message);
     }
   }
 
@@ -271,11 +326,11 @@ class RTCleaner {
     cron.schedule('*/1 * * * *', async () => {
       console.log('🔄 Scheduled process triggered');
       
-      // First send new tweets
+      // First send new tweets (original tweets only)
       await this.sendNewTweets();
       
-      // Then clean up RT records
-      await this.deleteRetweetRecords();
+      // Then clean up RT and reply records
+      await this.deleteRetweetAndReplyRecords();
       
     }, {
       scheduled: true,
@@ -291,7 +346,7 @@ class RTCleaner {
     
     // Only send new tweets, don't process historical data
     await this.sendNewTweets();
-    await this.deleteRetweetRecords();
+    await this.deleteRetweetAndReplyRecords();
     
     console.log('🏁 Manual operations finished.');
   }
